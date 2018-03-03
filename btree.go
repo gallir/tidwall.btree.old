@@ -669,17 +669,17 @@ func (t *BTree) ReplaceOrInsert(item Item) Item {
 		t.root.items = append(t.root.items, item)
 		t.length++
 		return nil
-	} else {
-		t.root = t.root.mutableFor(t.cow)
-		if len(t.root.items) >= t.maxItems() {
-			item2, second := t.root.split(t.maxItems() / 2)
-			oldroot := t.root
-			t.root = t.cow.newNode()
-			t.root.items = append(t.root.items, item2)
-			t.root.children = append(t.root.children, oldroot, second)
-		}
 	}
-	out := t.root.insert(item, t.maxItems(), t.ctx)
+	root := t.root.mutableFor(t.cow)
+	if len(root.items) >= t.maxItems() {
+		item2, second := root.split(t.maxItems() / 2)
+		oldroot := root
+		root = t.cow.newNode()
+		root.items = append(root.items, item2)
+		root.children = append(root.children, oldroot, second)
+	}
+	out := root.insert(item, t.maxItems(), t.ctx)
+	t.root = root
 	if out == nil {
 		t.length++
 	}
@@ -708,12 +708,13 @@ func (t *BTree) deleteItem(item Item, typ toRemove, ctx interface{}) Item {
 	if t.root == nil || len(t.root.items) == 0 {
 		return nil
 	}
-	t.root = t.root.mutableFor(t.cow)
-	out := t.root.remove(item, t.minItems(), typ, ctx)
-	if len(t.root.items) == 0 && len(t.root.children) > 0 {
-		oldroot := t.root
-		t.root = t.root.children[0]
-		t.cow.freeNode(oldroot)
+	root := t.root.mutableFor(t.cow)
+	out := root.remove(item, t.minItems(), typ, ctx)
+	if len(root.items) == 0 && len(root.children) > 0 {
+		t.root = root.children[0]
+		t.cow.freeNode(root)
+	} else {
+		t.root = root
 	}
 	if out != nil {
 		t.length--
