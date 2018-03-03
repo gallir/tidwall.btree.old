@@ -462,35 +462,43 @@ func (n *node) remove(item Item, minItems int, typ toRemove, ctx interface{}) It
 func (n *node) growChildAndRemove(i int, item Item, minItems int, typ toRemove, ctx interface{}) Item {
 	if i > 0 && len(n.children[i-1].items) > minItems {
 		// Steal from left child
-		child := n.mutableChild(i)
-		stealFrom := n.mutableChild(i - 1)
+		child := n.children[i].mutableFor(n.cow)
+		stealFrom := n.children[i-1].mutableFor(n.cow)
 		stolenItem := stealFrom.items.pop()
 		child.items.insertAt(0, n.items[i-1])
-		n.items[i-1] = stolenItem
 		if len(stealFrom.children) > 0 {
 			child.children.insertAt(0, stealFrom.children.pop())
 		}
+		n.items[i-1] = stolenItem
+		n.children[i] = child
+		n.children[i-1] = stealFrom
+
 	} else if i < len(n.items) && len(n.children[i+1].items) > minItems {
 		// steal from right child
-		child := n.mutableChild(i)
-		stealFrom := n.mutableChild(i + 1)
+		child := n.children[i].mutableFor(n.cow)
+		stealFrom := n.children[i+1].mutableFor(n.cow)
 		stolenItem := stealFrom.items.removeAt(0)
 		child.items = append(child.items, n.items[i])
-		n.items[i] = stolenItem
 		if len(stealFrom.children) > 0 {
 			child.children = append(child.children, stealFrom.children.removeAt(0))
 		}
+		n.items[i] = stolenItem
+		n.children[i] = child
+		n.children[i+1] = stealFrom
 	} else {
 		if i >= len(n.items) {
 			i--
 		}
-		child := n.mutableChild(i)
+		child := n.children[i].mutableFor(n.cow)
 		// merge with right child
-		mergeItem := n.items.removeAt(i)
-		mergeChild := n.children.removeAt(i + 1)
+		mergeItem := n.items[i]
+		mergeChild := n.children[i+1]
 		child.items = append(child.items, mergeItem)
 		child.items = append(child.items, mergeChild.items...)
 		child.children = append(child.children, mergeChild.children...)
+		n.children[i] = child
+		n.items.removeAt(i)
+		n.children.removeAt(i + 1)
 		n.cow.freeNode(mergeChild)
 	}
 	return n.remove(item, minItems, typ, ctx)
