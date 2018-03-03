@@ -334,7 +334,10 @@ func (n *node) insert(item Item, maxItems int, ctx interface{}) Item {
 			return out
 		}
 	}
-	return n.mutableChild(i).insert(item, maxItems, ctx)
+	c := n.children[i].mutableFor(n.cow)
+	out := c.insert(item, maxItems, ctx)
+	n.children[i] = c
+	return out
 }
 
 // get finds the given key in the subtree and returns it.
@@ -415,7 +418,7 @@ func (n *node) remove(item Item, minItems int, typ toRemove, ctx interface{}) It
 	if len(n.children[i].items) <= minItems {
 		return n.growChildAndRemove(i, item, minItems, typ, ctx)
 	}
-	child := n.mutableChild(i)
+	child := n.children[i].mutableFor(n.cow)
 	// Either we had enough items to begin with, or we've done some
 	// merging/stealing, because we've got enough now and we're ready to return
 	// stuff.
@@ -427,11 +430,14 @@ func (n *node) remove(item Item, minItems int, typ toRemove, ctx interface{}) It
 		// predecessor of item i (the rightmost leaf of our immediate left child)
 		// and set it into where we pulled the item from.
 		n.items[i] = child.remove(nil, minItems, removeMax, ctx)
+		n.children[i] = child
 		return out
 	}
 	// Final recursive call.  Once we're here, we know that the item isn't in this
 	// node and that the child is big enough to remove from.
-	return child.remove(item, minItems, typ, ctx)
+	out := child.remove(item, minItems, typ, ctx)
+	n.children[i] = child
+	return out
 }
 
 // growChildAndRemove grows child 'i' to make sure it's possible to remove an
