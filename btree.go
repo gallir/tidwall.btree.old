@@ -300,8 +300,9 @@ func (n *node) maybeSplitChild(i, maxItems int) bool {
 	if len(n.children[i].items) < maxItems {
 		return false
 	}
-	first := n.mutableChild(i)
+	first := n.children[i].mutableFor(n.cow)
 	item, second := first.split(maxItems / 2)
+	n.children[i] = first
 	n.items.insertAt(i, item)
 	n.children.insertAt(i+1, second)
 	return true
