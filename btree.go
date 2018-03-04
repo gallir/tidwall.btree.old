@@ -684,8 +684,9 @@ func (t *BTree) ReplaceOrInsert(item Item) Item {
 		panic("nil item being added to BTree")
 	}
 	if t.root == nil {
-		t.root = t.cow.newNode()
-		t.root.items = append(t.root.items, item)
+		root := t.cow.newNode()
+		root.items = append(root.items, item)
+		t.root = root
 		t.length++
 		return nil
 	}
