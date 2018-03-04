@@ -51,6 +51,9 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"unsafe"
 )
 
 // Item represents a single object in the tree.
@@ -80,28 +83,37 @@ var (
 // FreeList.
 // Two Btrees using the same freelist are safe for concurrent write access.
 type FreeList struct {
-	freelist chan *node
+	sync.Mutex
+	freelist []*node
 }
 
 // NewFreeList creates a new free list.
 // size is the maximum size of the returned free list.
 func NewFreeList(size int) *FreeList {
-	return &FreeList{freelist: make(chan *node, size)}
+	return &FreeList{freelist: make([]*node, 0, size)}
 }
 
 func (f *FreeList) newNode() (n *node) {
-	select {
-	case n := <-f.freelist:
-		return n
-	default:
+	f.Lock()
+	defer f.Unlock()
+
+	if len(f.freelist) == 0 || f.freelist[0].cow == n.cow {
 		return new(node)
 	}
+
+	n = f.freelist[0]
+	copy(f.freelist[0:], f.freelist[1:])
+	f.freelist[len(f.freelist)-1] = nil
+	f.freelist = f.freelist[:len(f.freelist)-1]
+	return n
 }
 
 func (f *FreeList) freeNode(n *node) {
-	select {
-	case f.freelist <- n:
-	default:
+	f.Lock()
+	defer f.Unlock()
+
+	if len(f.freelist) < cap(f.freelist) {
+		f.freelist = append(f.freelist, n)
 	}
 }
 
@@ -263,13 +275,14 @@ func (n *node) mutableFor(cow *copyOnWriteContext) *node {
 }
 
 func (n *node) swapChild(i int, n2 *node) {
+
+	oldp := unsafe.Pointer(&n.children[i])
+	newp := unsafe.Pointer(n2)
+	old := (*node)(atomic.SwapPointer(&oldp, newp))
 	/*
-		oldp := unsafe.Pointer(&n.children[i])
-		newp := unsafe.Pointer(n2)
-		old := (*node)(atomic.SwapPointer(&oldp, newp))
+		old := n.children[i]
+		n.children[i] = n2
 	*/
-	old := n.children[i]
-	n.children[i] = n2
 	n.cow.freeNode(old)
 }
 
