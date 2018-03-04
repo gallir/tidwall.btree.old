@@ -279,6 +279,10 @@ func (n *node) mutableChild(i int) *node {
 	return c
 }
 
+func (n *node) swapChild(i int, c *node) {
+	n.children[i] = c
+}
+
 // split splits the given node at the given index.  The current node shrinks,
 // and this function returns the item that existed at that index and a new node
 // containing all items/children after it.
@@ -302,7 +306,7 @@ func (n *node) maybeSplitChild(i, maxItems int) bool {
 	}
 	first := n.children[i].mutableFor(n.cow)
 	item, second := first.split(maxItems / 2)
-	n.children[i] = first
+	n.swapChild(i, first)
 	n.items.insertAt(i, item)
 	n.children.insertAt(i+1, second)
 	return true
@@ -337,7 +341,7 @@ func (n *node) insert(item Item, maxItems int, ctx interface{}) Item {
 	}
 	c := n.children[i].mutableFor(n.cow)
 	out := c.insert(item, maxItems, ctx)
-	n.children[i] = c
+	n.swapChild(i, c)
 	return out
 }
 
@@ -431,13 +435,13 @@ func (n *node) remove(item Item, minItems int, typ toRemove, ctx interface{}) It
 		// predecessor of item i (the rightmost leaf of our immediate left child)
 		// and set it into where we pulled the item from.
 		n.items[i] = child.remove(nil, minItems, removeMax, ctx)
-		n.children[i] = child
+		n.swapChild(i, child)
 		return out
 	}
 	// Final recursive call.  Once we're here, we know that the item isn't in this
 	// node and that the child is big enough to remove from.
 	out := child.remove(item, minItems, typ, ctx)
-	n.children[i] = child
+	n.swapChild(i, child)
 	return out
 }
 
@@ -471,8 +475,8 @@ func (n *node) growChildAndRemove(i int, item Item, minItems int, typ toRemove, 
 			child.children.insertAt(0, stealFrom.children.pop())
 		}
 		n.items[i-1] = stolenItem
-		n.children[i] = child
-		n.children[i-1] = stealFrom
+		n.swapChild(i, child)
+		n.swapChild(i-1, stealFrom)
 
 	} else if i < len(n.items) && len(n.children[i+1].items) > minItems {
 		// steal from right child
@@ -484,8 +488,8 @@ func (n *node) growChildAndRemove(i int, item Item, minItems int, typ toRemove, 
 			child.children = append(child.children, stealFrom.children.removeAt(0))
 		}
 		n.items[i] = stolenItem
-		n.children[i] = child
-		n.children[i+1] = stealFrom
+		n.swapChild(i, child)
+		n.swapChild(i+1, stealFrom)
 	} else {
 		if i >= len(n.items) {
 			i--
@@ -497,7 +501,7 @@ func (n *node) growChildAndRemove(i int, item Item, minItems int, typ toRemove, 
 		child.items = append(child.items, mergeItem)
 		child.items = append(child.items, mergeChild.items...)
 		child.children = append(child.children, mergeChild.children...)
-		n.children[i] = child
+		n.swapChild(i, child)
 		n.items.removeAt(i)
 		n.children.removeAt(i + 1)
 		n.cow.freeNode(mergeChild)
