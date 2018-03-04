@@ -51,7 +51,6 @@ import (
 	"fmt"
 	"io"
 	"strings"
-	"sync"
 )
 
 // Item represents a single object in the tree.
@@ -81,36 +80,29 @@ var (
 // FreeList.
 // Two Btrees using the same freelist are safe for concurrent write access.
 type FreeList struct {
-	mu       sync.Mutex
-	freelist []*node
+	freelist chan *node
 }
 
 // NewFreeList creates a new free list.
 // size is the maximum size of the returned free list.
 func NewFreeList(size int) *FreeList {
-	return &FreeList{freelist: make([]*node, 0, size)}
+	return &FreeList{freelist: make(chan *node, size)}
 }
 
 func (f *FreeList) newNode() (n *node) {
-	f.mu.Lock()
-	index := len(f.freelist) - 1
-	if index < 0 {
-		f.mu.Unlock()
+	select {
+	case n := <-f.freelist:
+		return n
+	default:
 		return new(node)
 	}
-	n = f.freelist[index]
-	f.freelist[index] = nil
-	f.freelist = f.freelist[:index]
-	f.mu.Unlock()
-	return
 }
 
 func (f *FreeList) freeNode(n *node) {
-	f.mu.Lock()
-	if len(f.freelist) < cap(f.freelist) {
-		f.freelist = append(f.freelist, n)
+	select {
+	case f.freelist <- n:
+	default:
 	}
-	f.mu.Unlock()
 }
 
 // ItemIterator allows callers of Ascend* to iterate in-order over portions of
@@ -253,9 +245,6 @@ type node struct {
 }
 
 func (n *node) mutableFor(cow *copyOnWriteContext) *node {
-	if n.cow == cow {
-		return n
-	}
 	out := cow.newNode()
 	if cap(out.items) >= len(n.items) {
 		out.items = out.items[:len(n.items)]
@@ -273,10 +262,15 @@ func (n *node) mutableFor(cow *copyOnWriteContext) *node {
 	return out
 }
 
-func (n *node) mutableChild(i int) *node {
-	c := n.children[i].mutableFor(n.cow)
-	n.children[i] = c
-	return c
+func (n *node) swapChild(i int, n2 *node) {
+	/*
+		oldp := unsafe.Pointer(&n.children[i])
+		newp := unsafe.Pointer(n2)
+		old := (*node)(atomic.SwapPointer(&oldp, newp))
+	*/
+	old := n.children[i]
+	n.children[i] = n2
+	n.cow.freeNode(old)
 }
 
 // split splits the given node at the given index.  The current node shrinks,
@@ -302,7 +296,7 @@ func (n *node) maybeSplitChild(i, maxItems int) bool {
 	}
 	first := n.children[i].mutableFor(n.cow)
 	item, second := first.split(maxItems / 2)
-	n.children[i] = first
+	n.swapChild(i, first)
 	n.items.insertAt(i, item)
 	n.children.insertAt(i+1, second)
 	return true
@@ -337,7 +331,7 @@ func (n *node) insert(item Item, maxItems int, ctx interface{}) Item {
 	}
 	c := n.children[i].mutableFor(n.cow)
 	out := c.insert(item, maxItems, ctx)
-	n.children[i] = c
+	n.swapChild(i, c)
 	return out
 }
 
@@ -431,13 +425,13 @@ func (n *node) remove(item Item, minItems int, typ toRemove, ctx interface{}) It
 		// predecessor of item i (the rightmost leaf of our immediate left child)
 		// and set it into where we pulled the item from.
 		n.items[i] = child.remove(nil, minItems, removeMax, ctx)
-		n.children[i] = child
+		n.swapChild(i, child)
 		return out
 	}
 	// Final recursive call.  Once we're here, we know that the item isn't in this
 	// node and that the child is big enough to remove from.
 	out := child.remove(item, minItems, typ, ctx)
-	n.children[i] = child
+	n.swapChild(i, child)
 	return out
 }
 
@@ -471,8 +465,8 @@ func (n *node) growChildAndRemove(i int, item Item, minItems int, typ toRemove, 
 			child.children.insertAt(0, stealFrom.children.pop())
 		}
 		n.items[i-1] = stolenItem
-		n.children[i] = child
-		n.children[i-1] = stealFrom
+		n.swapChild(i, child)
+		n.swapChild(i-1, stealFrom)
 
 	} else if i < len(n.items) && len(n.children[i+1].items) > minItems {
 		// steal from right child
@@ -484,8 +478,8 @@ func (n *node) growChildAndRemove(i int, item Item, minItems int, typ toRemove, 
 			child.children = append(child.children, stealFrom.children.removeAt(0))
 		}
 		n.items[i] = stolenItem
-		n.children[i] = child
-		n.children[i+1] = stealFrom
+		n.swapChild(i, child)
+		n.swapChild(i+1, stealFrom)
 	} else {
 		if i >= len(n.items) {
 			i--
@@ -497,7 +491,7 @@ func (n *node) growChildAndRemove(i int, item Item, minItems int, typ toRemove, 
 		child.items = append(child.items, mergeItem)
 		child.items = append(child.items, mergeChild.items...)
 		child.children = append(child.children, mergeChild.children...)
-		n.children[i] = child
+		n.swapChild(i, child)
 		n.items.removeAt(i)
 		n.children.removeAt(i + 1)
 		n.cow.freeNode(mergeChild)
@@ -694,7 +688,9 @@ func (t *BTree) ReplaceOrInsert(item Item) Item {
 		root.children = append(root.children, oldroot, second)
 	}
 	out := root.insert(item, t.maxItems(), t.ctx)
+	old := t.root
 	t.root = root
+	t.cow.freeNode(old)
 	if out == nil {
 		t.length++
 	}
@@ -724,6 +720,7 @@ func (t *BTree) deleteItem(item Item, typ toRemove, ctx interface{}) Item {
 		return nil
 	}
 	root := t.root.mutableFor(t.cow)
+	old := t.root
 	out := root.remove(item, t.minItems(), typ, ctx)
 	if len(root.items) == 0 && len(root.children) > 0 {
 		t.root = root.children[0]
@@ -734,6 +731,7 @@ func (t *BTree) deleteItem(item Item, typ toRemove, ctx interface{}) Item {
 	if out != nil {
 		t.length--
 	}
+	t.cow.freeNode(old)
 	return out
 }
 
