@@ -528,7 +528,12 @@ func (n *node) iterate(dir direction, start, stop Item, includeStart bool, hit b
 	switch dir {
 	case ascend:
 		for i := 0; i < len(n.items); i++ {
-			if start != nil && n.items[i].Less(start, ctx) {
+			item := n.items[i]
+			if item == nil {
+				// The last item may be nil if the slices is being truncated
+				break
+			}
+			if start != nil && item.Less(start, ctx) {
 				continue
 			}
 			if len(n.children) > 0 {
@@ -536,46 +541,60 @@ func (n *node) iterate(dir direction, start, stop Item, includeStart bool, hit b
 					return hit, false
 				}
 			}
-			if !includeStart && !hit && start != nil && !start.Less(n.items[i], ctx) {
+			if !includeStart && !hit && start != nil && !start.Less(item, ctx) {
 				hit = true
 				continue
 			}
 			hit = true
-			if stop != nil && !n.items[i].Less(stop, ctx) {
+			if stop != nil && !item.Less(stop, ctx) {
 				return hit, false
 			}
-			if !iter(n.items[i]) {
+			if !iter(item) {
 				return hit, false
 			}
 		}
 		if len(n.children) > 0 {
-			if hit, ok = n.children[len(n.children)-1].iterate(dir, start, stop, includeStart, hit, iter, ctx); !ok {
-				return hit, false
+			child := n.children[len(n.children)-1]
+			if child != nil {
+				if hit, ok = child.iterate(dir, start, stop, includeStart, hit, iter, ctx); !ok {
+					return hit, false
+				}
 			}
 		}
 	case descend:
 		for i := len(n.items) - 1; i >= 0; i-- {
-			if start != nil && !n.items[i].Less(start, ctx) {
-				if !includeStart || hit || start.Less(n.items[i], ctx) {
+			item := n.items[i]
+			if item == nil {
+				// The last item may be nil if the slices is being truncated
+				break
+			}
+			if start != nil && !item.Less(start, ctx) {
+				if !includeStart || hit || start.Less(item, ctx) {
 					continue
 				}
 			}
 			if len(n.children) > 0 {
-				if hit, ok = n.children[i+1].iterate(dir, start, stop, includeStart, hit, iter, ctx); !ok {
-					return hit, false
+				child := n.children[i+1]
+				if child != nil {
+					if hit, ok = child.iterate(dir, start, stop, includeStart, hit, iter, ctx); !ok {
+						return hit, false
+					}
 				}
 			}
-			if stop != nil && !stop.Less(n.items[i], ctx) {
+			if stop != nil && !stop.Less(item, ctx) {
 				return hit, false //	continue
 			}
 			hit = true
-			if !iter(n.items[i]) {
+			if !iter(item) {
 				return hit, false
 			}
 		}
 		if len(n.children) > 0 {
-			if hit, ok = n.children[0].iterate(dir, start, stop, includeStart, hit, iter, ctx); !ok {
-				return hit, false
+			child := n.children[0]
+			if child != nil {
+				if hit, ok = child.iterate(dir, start, stop, includeStart, hit, iter, ctx); !ok {
+					return hit, false
+				}
 			}
 		}
 	}
