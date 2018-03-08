@@ -96,9 +96,9 @@ func NewFreeList(size int) *FreeList {
 	}
 }
 
-func (f *FreeList) newNode() (n *node) {
+func (f *FreeList) newNode(cow *copyOnWriteContext) (n *node) {
 	f.mu.Lock()
-	if f.n <= 0 {
+	if f.n <= 0 || f.freelist[f.out].cow == cow {
 		f.mu.Unlock()
 		return new(node)
 	}
@@ -107,6 +107,7 @@ func (f *FreeList) newNode() (n *node) {
 	f.out = (f.out + 1) % f.size
 	f.n--
 	f.mu.Unlock()
+	n.clear()
 	return
 }
 
@@ -259,10 +260,14 @@ type node struct {
 	cow      *copyOnWriteContext
 }
 
+func (n *node) clear() {
+	// clear to allow GC
+	n.items.truncate(0)
+	n.children.truncate(0)
+	n.cow = nil
+}
+
 func (n *node) mutableFor(cow *copyOnWriteContext) *node {
-	if n.cow == cow {
-		return n
-	}
 	out := cow.newNode()
 	if cap(out.items) >= len(n.items) {
 		out.items = out.items[:len(n.items)]
@@ -287,7 +292,9 @@ func (n *node) mutableChild(i int) *node {
 }
 
 func (n *node) swapChild(i int, c *node) {
-	n.children[i] = c
+	var old *node
+	n.children[i], old = c, n.children[i]
+	n.cow.freeNode(old)
 }
 
 // split splits the given node at the given index.  The current node shrinks,
@@ -700,19 +707,13 @@ func (t *BTree) minItems() int {
 }
 
 func (c *copyOnWriteContext) newNode() (n *node) {
-	n = c.freelist.newNode()
+	n = c.freelist.newNode(c)
 	n.cow = c
 	return
 }
 
 func (c *copyOnWriteContext) freeNode(n *node) {
-	if n.cow == c {
-		// clear to allow GC
-		n.items.truncate(0)
-		n.children.truncate(0)
-		n.cow = nil
-		c.freelist.freeNode(n)
-	}
+	c.freelist.freeNode(n)
 }
 
 // ReplaceOrInsert adds the given item to the tree.  If an item in the tree
