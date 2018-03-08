@@ -82,33 +82,40 @@ var (
 // Two Btrees using the same freelist are safe for concurrent write access.
 type FreeList struct {
 	mu       sync.Mutex
+	n, size  int
+	in, out  int
 	freelist []*node
 }
 
 // NewFreeList creates a new free list.
 // size is the maximum size of the returned free list.
 func NewFreeList(size int) *FreeList {
-	return &FreeList{freelist: make([]*node, 0, size)}
+	return &FreeList{
+		freelist: make([]*node, size),
+		size:     size,
+	}
 }
 
 func (f *FreeList) newNode() (n *node) {
 	f.mu.Lock()
-	index := len(f.freelist) - 1
-	if index < 0 {
+	if f.n <= 0 {
 		f.mu.Unlock()
 		return new(node)
 	}
-	n = f.freelist[index]
-	f.freelist[index] = nil
-	f.freelist = f.freelist[:index]
+	n = f.freelist[f.out]
+	f.freelist[f.out] = nil
+	f.out = (f.out + 1) % f.size
+	f.n--
 	f.mu.Unlock()
 	return
 }
 
 func (f *FreeList) freeNode(n *node) {
 	f.mu.Lock()
-	if len(f.freelist) < cap(f.freelist) {
-		f.freelist = append(f.freelist, n)
+	if f.n < f.size {
+		f.freelist[f.in] = n
+		f.in = (f.in + 1) % f.size
+		f.n++
 	}
 	f.mu.Unlock()
 }
