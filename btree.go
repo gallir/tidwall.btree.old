@@ -536,9 +536,12 @@ func (n *node) iterate(dir direction, start, stop Item, includeStart bool, hit b
 			if start != nil && item.Less(start, ctx) {
 				continue
 			}
-			if len(n.children) > 0 {
-				if hit, ok = n.children[i].iterate(dir, start, stop, includeStart, hit, iter, ctx); !ok {
-					return hit, false
+			if len(n.children) > i {
+				child := n.children[i]
+				if child != nil {
+					if hit, ok = child.iterate(dir, start, stop, includeStart, hit, iter, ctx); !ok {
+						return hit, false
+					}
 				}
 			}
 			if !includeStart && !hit && start != nil && !start.Less(item, ctx) {
@@ -553,8 +556,8 @@ func (n *node) iterate(dir direction, start, stop Item, includeStart bool, hit b
 				return hit, false
 			}
 		}
-		if len(n.children) > 0 {
-			child := n.children[len(n.children)-1]
+		if l := len(n.children); l > 0 {
+			child := n.children[l-1]
 			if child != nil {
 				if hit, ok = child.iterate(dir, start, stop, includeStart, hit, iter, ctx); !ok {
 					return hit, false
