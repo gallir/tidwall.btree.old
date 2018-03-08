@@ -524,21 +524,31 @@ const (
 // thus creating a "greaterOrEqual" or "lessThanEqual" rather than just a
 // "greaterThan" or "lessThan" queries.
 func (n *node) iterate(dir direction, start, stop Item, includeStart bool, hit bool, iter ItemIterator, ctx interface{}) (bool, bool) {
+	defer func() {
+		// There is a race condition in slice index and length, this allow to recover
+		if r := recover(); r != nil {
+			fmt.Println("Iterate panic", r)
+		}
+	}()
 	var ok bool
+	var lastChild *node
+	var lastItem Item
 	switch dir {
 	case ascend:
 		for i := 0; i < len(n.items); i++ {
 			item := n.items[i]
-			if item == nil {
+			if item == nil || item == lastItem {
 				// The last item may be nil if the slices is being truncated
-				break
+				continue
 			}
+			lastItem = item
 			if start != nil && item.Less(start, ctx) {
 				continue
 			}
 			if len(n.children) > i {
 				child := n.children[i]
-				if child != nil {
+				if child != nil && child != lastChild {
+					lastChild = child
 					if hit, ok = child.iterate(dir, start, stop, includeStart, hit, iter, ctx); !ok {
 						return hit, false
 					}
@@ -558,7 +568,7 @@ func (n *node) iterate(dir direction, start, stop Item, includeStart bool, hit b
 		}
 		if l := len(n.children); l > 0 {
 			child := n.children[l-1]
-			if child != nil {
+			if child != nil && child != lastChild {
 				if hit, ok = child.iterate(dir, start, stop, includeStart, hit, iter, ctx); !ok {
 					return hit, false
 				}
@@ -567,10 +577,11 @@ func (n *node) iterate(dir direction, start, stop Item, includeStart bool, hit b
 	case descend:
 		for i := len(n.items) - 1; i >= 0; i-- {
 			item := n.items[i]
-			if item == nil {
+			if item == nil || item == lastItem {
 				// The last item may be nil if the slices is being truncated
-				break
+				continue
 			}
+			lastItem = item
 			if start != nil && !item.Less(start, ctx) {
 				if !includeStart || hit || start.Less(item, ctx) {
 					continue
@@ -578,7 +589,8 @@ func (n *node) iterate(dir direction, start, stop Item, includeStart bool, hit b
 			}
 			if len(n.children) > 0 {
 				child := n.children[i+1]
-				if child != nil {
+				if child != nil && child != lastChild {
+					lastChild = child
 					if hit, ok = child.iterate(dir, start, stop, includeStart, hit, iter, ctx); !ok {
 						return hit, false
 					}
@@ -594,7 +606,7 @@ func (n *node) iterate(dir direction, start, stop Item, includeStart bool, hit b
 		}
 		if len(n.children) > 0 {
 			child := n.children[0]
-			if child != nil {
+			if child != nil && child != lastChild {
 				if hit, ok = child.iterate(dir, start, stop, includeStart, hit, iter, ctx); !ok {
 					return hit, false
 				}
