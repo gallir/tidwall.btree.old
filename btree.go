@@ -97,6 +97,7 @@ func NewFreeList(size int) *FreeList {
 }
 
 func (f *FreeList) newNode(cow *copyOnWriteContext) (n *node) {
+	return new(node)
 	f.mu.Lock()
 	if f.n <= 0 || f.freelist[f.out].cow == cow {
 		f.mu.Unlock()
@@ -112,6 +113,7 @@ func (f *FreeList) newNode(cow *copyOnWriteContext) (n *node) {
 }
 
 func (f *FreeList) freeNode(n *node) {
+	return
 	f.mu.Lock()
 	if f.n < f.size {
 		f.freelist[f.in] = n
@@ -292,6 +294,9 @@ func (n *node) mutableChild(i int) *node {
 }
 
 func (n *node) swapChild(i int, c *node) {
+	if n.children[i] == c {
+		return
+	}
 	var old *node
 	n.children[i], old = c, n.children[i]
 	n.cow.freeNode(old)
@@ -314,33 +319,34 @@ func (n *node) split(i int) (Item, *node) {
 
 // maybeSplitChild checks if a child should be split, and if so splits it.
 // Returns whether or not a split occurred.
-func (n *node) maybeSplitChild(i, maxItems int) bool {
+func (n *node) maybeSplitChild(i, maxItems int) (bool, *node) {
 	if len(n.children[i].items) < maxItems {
-		return false
+		return false, n
 	}
+	myself := n.mutableFor(n.cow)
 	first := n.children[i].mutableFor(n.cow)
 	item, second := first.split(maxItems / 2)
-	n.swapChild(i, first)
-	n.items.insertAt(i, item)
-	n.children.insertAt(i+1, second)
-	return true
+	myself.swapChild(i, first)
+	myself.items.insertAt(i, item)
+	myself.children.insertAt(i+1, second)
+	return true, myself
 }
 
 // insert inserts an item into the subtree rooted at this node, making sure
 // no nodes in the subtree exceed maxItems items.  Should an equivalent item be
 // be found/replaced by insert, it will be returned.
-func (n *node) insert(item Item, maxItems int, ctx interface{}) Item {
+func (n *node) insert(item Item, maxItems int, ctx interface{}) (Item, *node) {
 	i, found := n.items.find(item, ctx)
 	if found {
 		out := n.items[i]
 		n.items[i] = item
-		return out
+		return out, n
 	}
 	if len(n.children) == 0 {
 		n.items.insertAt(i, item)
-		return nil
+		return nil, n
 	}
-	if n.maybeSplitChild(i, maxItems) {
+	if split, myself := n.maybeSplitChild(i, maxItems); split {
 		inTree := n.items[i]
 		switch {
 		case item.Less(inTree, ctx):
@@ -350,13 +356,15 @@ func (n *node) insert(item Item, maxItems int, ctx interface{}) Item {
 		default:
 			out := n.items[i]
 			n.items[i] = item
-			return out
+			return out, myself
 		}
+		n = myself
 	}
-	c := n.children[i].mutableFor(n.cow)
-	out := c.insert(item, maxItems, ctx)
-	n.swapChild(i, c)
-	return out
+	out, child := n.children[i].insert(item, maxItems, ctx)
+	if child != n.children[i] {
+		n.swapChild(i, child)
+	}
+	return out, n
 }
 
 // get finds the given key in the subtree and returns it.
@@ -408,36 +416,39 @@ const (
 )
 
 // remove removes an item from the subtree rooted at this node.
-func (n *node) remove(item Item, minItems int, typ toRemove, ctx interface{}) Item {
+func (n *node) remove(item Item, minItems int, typ toRemove, ctx interface{}) (Item, *node) {
 	var i int
 	var found bool
 	switch typ {
 	case removeMax:
 		if len(n.children) == 0 {
-			return n.items.pop()
+			myself := n.mutableFor(n.cow)
+			return myself.items.pop(), myself
 		}
 		i = len(n.items)
 	case removeMin:
 		if len(n.children) == 0 {
-			return n.items.removeAt(0)
+			myself := n.mutableFor(n.cow)
+			return n.items.removeAt(0), myself
 		}
 		i = 0
 	case removeItem:
 		i, found = n.items.find(item, ctx)
 		if len(n.children) == 0 {
 			if found {
-				return n.items.removeAt(i)
+				myself := n.mutableFor(n.cow)
+				return myself.items.removeAt(i), myself
 			}
-			return nil
+			return nil, n
 		}
 	default:
 		panic("invalid type")
 	}
 	// If we get to here, we have children.
 	if len(n.children[i].items) <= minItems {
-		return n.growChildAndRemove(i, item, minItems, typ, ctx)
+		myself := n.mutableFor(n.cow)
+		return myself.growChildAndRemove(i, item, minItems, typ, ctx)
 	}
-	child := n.children[i].mutableFor(n.cow)
 	// Either we had enough items to begin with, or we've done some
 	// merging/stealing, because we've got enough now and we're ready to return
 	// stuff.
@@ -448,15 +459,21 @@ func (n *node) remove(item Item, minItems int, typ toRemove, ctx interface{}) It
 		// We use our special-case 'remove' call with typ=maxItem to pull the
 		// predecessor of item i (the rightmost leaf of our immediate left child)
 		// and set it into where we pulled the item from.
-		n.items[i] = child.remove(nil, minItems, removeMax, ctx)
-		n.swapChild(i, child)
-		return out
+		item, child := n.children[i].remove(nil, minItems, removeMax, ctx)
+		if child != n.children[i] {
+			myself := n.mutableFor(n.cow)
+			myself.items[i] = item
+			myself.swapChild(i, child)
+			return out, myself
+		}
+		n.items[i] = item
+		return out, n
 	}
 	// Final recursive call.  Once we're here, we know that the item isn't in this
 	// node and that the child is big enough to remove from.
-	out := child.remove(item, minItems, typ, ctx)
+	out, child := n.children[i].remove(item, minItems, typ, ctx)
 	n.swapChild(i, child)
-	return out
+	return out, n
 }
 
 // growChildAndRemove grows child 'i' to make sure it's possible to remove an
@@ -478,7 +495,7 @@ func (n *node) remove(item Item, minItems int, typ toRemove, ctx interface{}) It
 // We then simply redo our remove call, and the second time (regardless of
 // whether we're in case 1 or 2), we'll have enough items and can guarantee
 // that we hit case A.
-func (n *node) growChildAndRemove(i int, item Item, minItems int, typ toRemove, ctx interface{}) Item {
+func (n *node) growChildAndRemove(i int, item Item, minItems int, typ toRemove, ctx interface{}) (Item, *node) {
 	if i > 0 && len(n.children[i-1].items) > minItems {
 		// Steal from left child
 		child := n.children[i].mutableFor(n.cow)
@@ -732,7 +749,7 @@ func (t *BTree) ReplaceOrInsert(item Item) Item {
 		t.length++
 		return nil
 	}
-	root := t.root.mutableFor(t.cow)
+	root := t.root
 	if len(root.items) >= t.maxItems() {
 		item2, second := root.split(t.maxItems() / 2)
 		oldroot := root
@@ -740,8 +757,8 @@ func (t *BTree) ReplaceOrInsert(item Item) Item {
 		root.items = append(root.items, item2)
 		root.children = append(root.children, oldroot, second)
 	}
-	out := root.insert(item, t.maxItems(), t.ctx)
-	t.root = root
+	out, myself := root.insert(item, t.maxItems(), t.ctx)
+	t.root = myself
 	if out == nil {
 		t.length++
 	}
