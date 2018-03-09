@@ -270,6 +270,9 @@ func (n *node) clear() {
 }
 
 func (n *node) mutableFor(cow *copyOnWriteContext) *node {
+	if n.cow == cow {
+		return n
+	}
 	out := cow.newNode()
 	if cap(out.items) >= len(n.items) {
 		out.items = out.items[:len(n.items)]
@@ -347,18 +350,21 @@ func (n *node) insert(item Item, maxItems int, ctx interface{}) (Item, *node) {
 		return nil, n
 	}
 	if split, myself := n.maybeSplitChild(i, maxItems); split {
-		inTree := n.items[i]
+		inTree := myself.items[i]
 		switch {
 		case item.Less(inTree, ctx):
 			// no change, we want first split node
 		case inTree.Less(item, ctx):
 			i++ // we want second split node
 		default:
-			out := n.items[i]
-			n.items[i] = item
+			out := myself.items[i]
+			myself.items[i] = item
 			return out, myself
 		}
-		n = myself
+		if n != myself {
+			n, myself = myself, n
+			n.cow.freeNode(myself)
+		}
 	}
 	out, child := n.children[i].insert(item, maxItems, ctx)
 	if child != n.children[i] {
@@ -750,6 +756,8 @@ func (t *BTree) ReplaceOrInsert(item Item) Item {
 		return nil
 	}
 	root := t.root
+	var out Item
+
 	if len(root.items) >= t.maxItems() {
 		item2, second := root.split(t.maxItems() / 2)
 		oldroot := root
@@ -757,8 +765,11 @@ func (t *BTree) ReplaceOrInsert(item Item) Item {
 		root.items = append(root.items, item2)
 		root.children = append(root.children, oldroot, second)
 	}
-	out, myself := root.insert(item, t.maxItems(), t.ctx)
-	t.root = myself
+	out, root = root.insert(item, t.maxItems(), t.ctx)
+	if t.root != root {
+		t.root, root = root, t.root
+		t.cow.freeNode(root)
+	}
 	if out == nil {
 		t.length++
 	}
@@ -787,13 +798,15 @@ func (t *BTree) deleteItem(item Item, typ toRemove, ctx interface{}) Item {
 	if t.root == nil || len(t.root.items) == 0 {
 		return nil
 	}
-	root := t.root.mutableFor(t.cow)
-	out := root.remove(item, t.minItems(), typ, ctx)
+	out, root := t.root.remove(item, t.minItems(), typ, ctx)
 	if len(root.items) == 0 && len(root.children) > 0 {
 		t.root = root.children[0]
 		t.cow.freeNode(root)
 	} else {
-		t.root = root
+		if t.root != root {
+			t.root, root = root, t.root
+			t.cow.freeNode(root)
+		}
 	}
 	if out != nil {
 		t.length--
