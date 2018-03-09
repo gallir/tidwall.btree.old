@@ -282,6 +282,7 @@ func (n *node) mutableFor(cow *copyOnWriteContext) *node {
 		out.children = make(children, len(n.children), cap(n.children))
 	}
 	copy(out.children, n.children)
+	out.cow = cow
 	return out
 }
 
@@ -713,6 +714,7 @@ func (c *copyOnWriteContext) newNode() (n *node) {
 }
 
 func (c *copyOnWriteContext) freeNode(n *node) {
+	n.cow = c
 	c.freelist.freeNode(n)
 }
 
@@ -741,6 +743,7 @@ func (t *BTree) ReplaceOrInsert(item Item) Item {
 		root.children = append(root.children, oldroot, second)
 	}
 	out := root.insert(item, t.maxItems(), t.ctx)
+	t.cow.freeNode(t.root)
 	t.root = root
 	if out == nil {
 		t.length++
@@ -772,6 +775,7 @@ func (t *BTree) deleteItem(item Item, typ toRemove, ctx interface{}) Item {
 	}
 	root := t.root.mutableFor(t.cow)
 	out := root.remove(item, t.minItems(), typ, ctx)
+	t.cow.freeNode(t.root)
 	if len(root.items) == 0 && len(root.children) > 0 {
 		t.root = root.children[0]
 		t.cow.freeNode(root)
