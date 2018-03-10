@@ -226,10 +226,25 @@ func (s *children) insertAt(index int, n *node) {
 
 // setAt store the node in position i and return the previous node
 func (s *children) setAt(index int, n *node) (old *node) {
+	/******
+	old = (*s)[index]
+	(*s)[index] = n
+	****/
 	e := unsafe.Pointer(&(*s)[index])
 	o := atomic.SwapPointer((*unsafe.Pointer)(e), unsafe.Pointer(n))
 	old = (*node)(o)
 	return
+}
+
+// setAt store the node in position i and return the previous node
+func (s *children) getAt(index int) (n *node) {
+	e := unsafe.Pointer(&(*s)[index])
+	o := atomic.LoadPointer((*unsafe.Pointer)(e))
+	n = (*node)(o)
+	return
+	/****
+	return (*s)[index]
+	****/
 }
 
 // removeAt removes a value at a given index, pulling all subsequent values
@@ -280,9 +295,11 @@ func (n *node) clear() {
 }
 
 func (n *node) mutableFor(cow *copyOnWriteContext) *node {
+	/*******
 	if n.cow == cow {
 		return n
 	}
+	********/
 	out := cow.newNode()
 	if cap(out.items) >= len(n.items) {
 		out.items = out.items[:len(n.items)]
@@ -378,7 +395,9 @@ func (n *node) insert(item Item, maxItems int, ctx interface{}) (Item, *node) {
 	}
 	out, child := n.children[i].insert(item, maxItems, ctx)
 	if child != n.children[i] {
-		n.swapChild(i, child)
+		myself := n.mutableFor(n.cow)
+		myself.swapChild(i, child)
+		return out, myself
 	}
 	return out, n
 }
@@ -578,27 +597,17 @@ func (n *node) iterate(dir direction, start, stop Item, includeStart bool, hit b
 		}
 	}()
 	var ok bool
-	var lastChild *node
-	var lastItem Item
 	switch dir {
 	case ascend:
 		for i := 0; i < len(n.items); i++ {
 			item := n.items[i]
-			if item == nil || item == lastItem {
-				// The last item may be nil if the slices is being truncated
-				continue
-			}
-			lastItem = item
 			if start != nil && item.Less(start, ctx) {
 				continue
 			}
 			if len(n.children) > i {
-				child := n.children[i]
-				if child != nil && child != lastChild {
-					lastChild = child
-					if hit, ok = child.iterate(dir, start, stop, includeStart, hit, iter, ctx); !ok {
-						return hit, false
-					}
+				child := n.children.getAt(i)
+				if hit, ok = child.iterate(dir, start, stop, includeStart, hit, iter, ctx); !ok {
+					return hit, false
 				}
 			}
 			if !includeStart && !hit && start != nil && !start.Less(item, ctx) {
@@ -614,33 +623,23 @@ func (n *node) iterate(dir direction, start, stop Item, includeStart bool, hit b
 			}
 		}
 		if l := len(n.children); l > 0 {
-			child := n.children[l-1]
-			if child != nil && child != lastChild {
-				if hit, ok = child.iterate(dir, start, stop, includeStart, hit, iter, ctx); !ok {
-					return hit, false
-				}
+			child := n.children.getAt(l - 1)
+			if hit, ok = child.iterate(dir, start, stop, includeStart, hit, iter, ctx); !ok {
+				return hit, false
 			}
 		}
 	case descend:
 		for i := len(n.items) - 1; i >= 0; i-- {
 			item := n.items[i]
-			if item == nil || item == lastItem {
-				// The last item may be nil if the slices is being truncated
-				continue
-			}
-			lastItem = item
 			if start != nil && !item.Less(start, ctx) {
 				if !includeStart || hit || start.Less(item, ctx) {
 					continue
 				}
 			}
 			if len(n.children) > 0 {
-				child := n.children[i+1]
-				if child != nil && child != lastChild {
-					lastChild = child
-					if hit, ok = child.iterate(dir, start, stop, includeStart, hit, iter, ctx); !ok {
-						return hit, false
-					}
+				child := n.children.getAt(i + 1)
+				if hit, ok = child.iterate(dir, start, stop, includeStart, hit, iter, ctx); !ok {
+					return hit, false
 				}
 			}
 			if stop != nil && !stop.Less(item, ctx) {
@@ -652,11 +651,9 @@ func (n *node) iterate(dir direction, start, stop Item, includeStart bool, hit b
 			}
 		}
 		if len(n.children) > 0 {
-			child := n.children[0]
-			if child != nil && child != lastChild {
-				if hit, ok = child.iterate(dir, start, stop, includeStart, hit, iter, ctx); !ok {
-					return hit, false
-				}
+			child := n.children.getAt(0)
+			if hit, ok = child.iterate(dir, start, stop, includeStart, hit, iter, ctx); !ok {
+				return hit, false
 			}
 		}
 	}
