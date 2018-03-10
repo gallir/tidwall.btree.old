@@ -98,9 +98,8 @@ func NewFreeList(size int) *FreeList {
 }
 
 func (f *FreeList) newNode(cow *copyOnWriteContext) (n *node) {
-	return new(node)
 	f.mu.Lock()
-	if f.n <= 0 || f.freelist[f.out].cow == cow {
+	if f.n <= 0 || f.freelist[f.out].sequence == cow.sequence {
 		f.mu.Unlock()
 		return new(node)
 	}
@@ -109,12 +108,12 @@ func (f *FreeList) newNode(cow *copyOnWriteContext) (n *node) {
 	f.out = (f.out + 1) % f.size
 	f.n--
 	f.mu.Unlock()
+	fmt.Println("got", n.sequence, cow.sequence, f.n)
 	n.clear()
 	return
 }
 
 func (f *FreeList) freeNode(n *node) {
-	return
 	f.mu.Lock()
 	if f.n < f.size {
 		f.freelist[f.in] = n
@@ -240,8 +239,7 @@ func (s *children) setAt(index int, n *node) (old *node) {
 func (s *children) removeAt(index int) *node {
 	n := (*s)[index]
 	copy((*s)[index:], (*s)[index+1:])
-	s.setAt(len(*s)-1, nil)
-	//(*s)[len(*s)-1] = nil
+	(*s)[len(*s)-1] = nil
 	*s = (*s)[:len(*s)-1]
 	return n
 }
@@ -273,6 +271,7 @@ type node struct {
 	items    items
 	children children
 	cow      *copyOnWriteContext
+	sequence int32
 }
 
 func (n *node) clear() {
@@ -682,6 +681,7 @@ type BTree struct {
 // copy.
 type copyOnWriteContext struct {
 	freelist *FreeList
+	sequence int32
 }
 
 // Clone clones the btree, lazily.  Clone should not be called concurrently,
@@ -726,6 +726,7 @@ func (c *copyOnWriteContext) newNode() (n *node) {
 }
 
 func (c *copyOnWriteContext) freeNode(n *node) {
+	n.sequence = c.sequence
 	c.freelist.freeNode(n)
 }
 
@@ -753,6 +754,7 @@ func (t *BTree) ReplaceOrInsert(item Item) Item {
 	}
 
 	root := t.getRoot()
+	t.cow.sequence++
 
 	if root == nil {
 		r := t.cow.newNode()
@@ -811,6 +813,7 @@ func (t *BTree) deleteItem(item Item, typ toRemove, ctx interface{}) Item {
 	if troot == nil || len(troot.items) == 0 {
 		return nil
 	}
+	t.cow.sequence++
 	out, root := troot.remove(item, t.minItems(), typ, ctx)
 	if len(root.items) == 0 && len(root.children) > 0 {
 		troot = root.children[0]
