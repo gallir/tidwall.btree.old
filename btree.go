@@ -346,8 +346,9 @@ func (n *node) insert(item Item, maxItems int, ctx interface{}) (Item, *node) {
 		return out, n
 	}
 	if len(n.children) == 0 {
-		n.items.insertAt(i, item)
-		return nil, n
+		myself := n.mutableFor(n.cow)
+		myself.items.insertAt(i, item)
+		return nil, myself
 	}
 	if split, myself := n.maybeSplitChild(i, maxItems); split {
 		inTree := myself.items[i]
@@ -755,17 +756,21 @@ func (t *BTree) ReplaceOrInsert(item Item) Item {
 		t.length++
 		return nil
 	}
-	root := t.root
-	var out Item
 
-	if len(root.items) >= t.maxItems() {
+	if len(t.root.items) >= t.maxItems() {
+		root := t.root.mutableFor(t.cow)
 		item2, second := root.split(t.maxItems() / 2)
 		oldroot := root
 		root = t.cow.newNode()
 		root.items = append(root.items, item2)
 		root.children = append(root.children, oldroot, second)
+		if t.root != root {
+			t.root, root = root, t.root
+			t.cow.freeNode(root)
+		}
 	}
-	out, root = root.insert(item, t.maxItems(), t.ctx)
+
+	out, root := t.root.insert(item, t.maxItems(), t.ctx)
 	if t.root != root {
 		t.root, root = root, t.root
 		t.cow.freeNode(root)
