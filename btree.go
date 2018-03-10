@@ -52,6 +52,8 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"unsafe"
 )
 
 // Item represents a single object in the tree.
@@ -219,7 +221,15 @@ func (s *children) insertAt(index int, n *node) {
 	if index < len(*s) {
 		copy((*s)[index+1:], (*s)[index:])
 	}
-	(*s)[index] = n
+	s.setAt(index, n)
+}
+
+// setAt store the node in position i and return the previous node
+func (s *children) setAt(index int, n *node) (old *node) {
+	e := unsafe.Pointer(&(*s)[index])
+	o := atomic.SwapPointer((*unsafe.Pointer)(e), unsafe.Pointer(n))
+	old = (*node)(o)
+	return
 }
 
 // removeAt removes a value at a given index, pulling all subsequent values
@@ -227,7 +237,8 @@ func (s *children) insertAt(index int, n *node) {
 func (s *children) removeAt(index int) *node {
 	n := (*s)[index]
 	copy((*s)[index:], (*s)[index+1:])
-	(*s)[len(*s)-1] = nil
+	s.setAt(len(*s)-1, nil)
+	//(*s)[len(*s)-1] = nil
 	*s = (*s)[:len(*s)-1]
 	return n
 }
@@ -235,8 +246,7 @@ func (s *children) removeAt(index int) *node {
 // pop removes and returns the last element in the list.
 func (s *children) pop() (out *node) {
 	index := len(*s) - 1
-	out = (*s)[index]
-	(*s)[index] = nil
+	out = s.setAt(index, nil)
 	*s = (*s)[:index]
 	return
 }
@@ -297,11 +307,10 @@ func (n *node) mutableChild(i int) *node {
 }
 
 func (n *node) swapChild(i int, c *node) {
-	if n.children[i] == c {
+	old := n.children.setAt(i, c)
+	if old == c {
 		return
 	}
-	var old *node
-	n.children[i], old = c, n.children[i]
 	n.cow.freeNode(old)
 }
 
@@ -672,7 +681,7 @@ func (n *node) print(w io.Writer, level int) {
 type BTree struct {
 	degree int
 	length int
-	root   *node
+	root   atomic.Value
 	ctx    interface{}
 	cow    *copyOnWriteContext
 }
@@ -740,6 +749,19 @@ func (c *copyOnWriteContext) freeNode(n *node) {
 	c.freelist.freeNode(n)
 }
 
+func (t *BTree) getRoot() (n *node) {
+	v := t.root.Load()
+	if v == nil {
+		return
+	}
+	n = v.(*node)
+	return
+}
+
+func (t *BTree) setRoot(n *node) {
+	t.root.Store(n)
+}
+
 // ReplaceOrInsert adds the given item to the tree.  If an item in the tree
 // already equals the given one, it is removed from the tree and returned.
 // Otherwise, nil is returned.
@@ -749,31 +771,36 @@ func (t *BTree) ReplaceOrInsert(item Item) Item {
 	if item == nil {
 		panic("nil item being added to BTree")
 	}
-	if t.root == nil {
-		root := t.cow.newNode()
-		root.items = append(root.items, item)
-		t.root = root
+
+	root := t.getRoot()
+
+	if root == nil {
+		r := t.cow.newNode()
+		r.items = append(r.items, item)
+		t.root.Store(r)
 		t.length++
 		return nil
 	}
 
-	if len(t.root.items) >= t.maxItems() {
-		root := t.root.mutableFor(t.cow)
-		item2, second := root.split(t.maxItems() / 2)
-		oldroot := root
-		root = t.cow.newNode()
-		root.items = append(root.items, item2)
-		root.children = append(root.children, oldroot, second)
-		if t.root != root {
-			t.root, root = root, t.root
-			t.cow.freeNode(root)
+	if len(root.items) >= t.maxItems() {
+		r := root.mutableFor(t.cow)
+		item2, second := r.split(t.maxItems() / 2)
+		oldroot := r
+		r = t.cow.newNode()
+		r.items = append(r.items, item2)
+		r.children = append(r.children, oldroot, second)
+		if root != r {
+			root, r = r, root
+			t.setRoot(root)
+			t.cow.freeNode(r)
 		}
 	}
 
-	out, root := t.root.insert(item, t.maxItems(), t.ctx)
-	if t.root != root {
-		t.root, root = root, t.root
-		t.cow.freeNode(root)
+	out, r := root.insert(item, t.maxItems(), t.ctx)
+	if root != r {
+		root, r = r, root
+		t.setRoot(root)
+		t.cow.freeNode(r)
 	}
 	if out == nil {
 		t.length++
@@ -800,16 +827,19 @@ func (t *BTree) DeleteMax() Item {
 }
 
 func (t *BTree) deleteItem(item Item, typ toRemove, ctx interface{}) Item {
-	if t.root == nil || len(t.root.items) == 0 {
+	troot := t.getRoot()
+	if troot == nil || len(troot.items) == 0 {
 		return nil
 	}
-	out, root := t.root.remove(item, t.minItems(), typ, ctx)
+	out, root := troot.remove(item, t.minItems(), typ, ctx)
 	if len(root.items) == 0 && len(root.children) > 0 {
-		t.root = root.children[0]
+		troot = root.children[0]
+		t.setRoot(troot)
 		t.cow.freeNode(root)
 	} else {
-		if t.root != root {
-			t.root, root = root, t.root
+		if troot != root {
+			troot, root = root, troot
+			t.setRoot(troot)
 			t.cow.freeNode(root)
 		}
 	}
@@ -822,92 +852,101 @@ func (t *BTree) deleteItem(item Item, typ toRemove, ctx interface{}) Item {
 // AscendRange calls the iterator for every value in the tree within the range
 // [greaterOrEqual, lessThan), until iterator returns false.
 func (t *BTree) AscendRange(greaterOrEqual, lessThan Item, iterator ItemIterator) {
-	if t.root == nil {
+	troot := t.getRoot()
+	if troot == nil {
 		return
 	}
-	t.root.iterate(ascend, greaterOrEqual, lessThan, true, false, iterator, t.ctx)
+	troot.iterate(ascend, greaterOrEqual, lessThan, true, false, iterator, t.ctx)
 }
 
 // AscendLessThan calls the iterator for every value in the tree within the range
 // [first, pivot), until iterator returns false.
 func (t *BTree) AscendLessThan(pivot Item, iterator ItemIterator) {
-	if t.root == nil {
+	troot := t.getRoot()
+	if troot == nil {
 		return
 	}
-	t.root.iterate(ascend, nil, pivot, false, false, iterator, t.ctx)
+	troot.iterate(ascend, nil, pivot, false, false, iterator, t.ctx)
 }
 
 // AscendGreaterOrEqual calls the iterator for every value in the tree within
 // the range [pivot, last], until iterator returns false.
 func (t *BTree) AscendGreaterOrEqual(pivot Item, iterator ItemIterator) {
-	if t.root == nil {
+	troot := t.getRoot()
+	if troot == nil {
 		return
 	}
-	t.root.iterate(ascend, pivot, nil, true, false, iterator, t.ctx)
+	troot.iterate(ascend, pivot, nil, true, false, iterator, t.ctx)
 }
 
 // Ascend calls the iterator for every value in the tree within the range
 // [first, last], until iterator returns false.
 func (t *BTree) Ascend(iterator ItemIterator) {
-	if t.root == nil {
+	troot := t.getRoot()
+	if troot == nil {
 		return
 	}
-	t.root.iterate(ascend, nil, nil, false, false, iterator, t.ctx)
+	troot.iterate(ascend, nil, nil, false, false, iterator, t.ctx)
 }
 
 // DescendRange calls the iterator for every value in the tree within the range
 // [lessOrEqual, greaterThan), until iterator returns false.
 func (t *BTree) DescendRange(lessOrEqual, greaterThan Item, iterator ItemIterator) {
-	if t.root == nil {
+	troot := t.getRoot()
+	if troot == nil {
 		return
 	}
-	t.root.iterate(descend, lessOrEqual, greaterThan, true, false, iterator, t.ctx)
+	troot.iterate(descend, lessOrEqual, greaterThan, true, false, iterator, t.ctx)
 }
 
 // DescendLessOrEqual calls the iterator for every value in the tree within the range
 // [pivot, first], until iterator returns false.
 func (t *BTree) DescendLessOrEqual(pivot Item, iterator ItemIterator) {
-	if t.root == nil {
+	troot := t.getRoot()
+	if troot == nil {
 		return
 	}
-	t.root.iterate(descend, pivot, nil, true, false, iterator, t.ctx)
+	troot.iterate(descend, pivot, nil, true, false, iterator, t.ctx)
 }
 
 // DescendGreaterThan calls the iterator for every value in the tree within
 // the range (pivot, last], until iterator returns false.
 func (t *BTree) DescendGreaterThan(pivot Item, iterator ItemIterator) {
-	if t.root == nil {
+	troot := t.getRoot()
+	if troot == nil {
 		return
 	}
-	t.root.iterate(descend, nil, pivot, false, false, iterator, t.ctx)
+	troot.iterate(descend, nil, pivot, false, false, iterator, t.ctx)
 }
 
 // Descend calls the iterator for every value in the tree within the range
 // [last, first], until iterator returns false.
 func (t *BTree) Descend(iterator ItemIterator) {
-	if t.root == nil {
+	troot := t.getRoot()
+	if troot == nil {
 		return
 	}
-	t.root.iterate(descend, nil, nil, false, false, iterator, t.ctx)
+	troot.iterate(descend, nil, nil, false, false, iterator, t.ctx)
 }
 
 // Get looks for the key item in the tree, returning it.  It returns nil if
 // unable to find that item.
 func (t *BTree) Get(key Item) Item {
-	if t.root == nil {
+	troot := t.getRoot()
+	if troot == nil {
 		return nil
 	}
-	return t.root.get(key, t.ctx)
+	return troot.get(key, t.ctx)
 }
 
 // Min returns the smallest item in the tree, or nil if the tree is empty.
 func (t *BTree) Min() Item {
-	return min(t.root)
+	return min(t.getRoot())
 }
 
 // Max returns the largest item in the tree, or nil if the tree is empty.
 func (t *BTree) Max() Item {
-	return max(t.root)
+	return max(t.getRoot())
 }
 
 // Has returns true if the given key is in the tree.
@@ -951,7 +990,7 @@ func (t *BTree) Cursor() *Cursor {
 // First moves the cursor to the first item in the tree and returns that item.
 func (c *Cursor) First() Item {
 	c.stack = c.stack[:0]
-	n := c.t.root
+	n := c.t.getRoot()
 	if n == nil {
 		return nil
 	}
@@ -996,7 +1035,7 @@ func (c *Cursor) Next() Item {
 // Last moves the cursor to the last item in the tree and returns that item.
 func (c *Cursor) Last() Item {
 	c.stack = c.stack[:0]
-	n := c.t.root
+	n := c.t.getRoot()
 	if n == nil {
 		return nil
 	}
@@ -1039,7 +1078,7 @@ func (c *Cursor) Prev() Item {
 // If the item does not exist then the next item is returned.
 func (c *Cursor) Seek(pivot Item) Item {
 	c.stack = c.stack[:0]
-	n := c.t.root
+	n := c.t.getRoot()
 	for n != nil {
 		i, found := n.items.find(pivot, c.t.ctx)
 		c.stack = append(c.stack, stackItem{n: n})
