@@ -53,7 +53,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"unsafe"
 )
 
 // Item represents a single object in the tree.
@@ -226,25 +225,14 @@ func (s *children) insertAt(index int, n *node) {
 
 // setAt store the node in position i and return the previous node
 func (s *children) setAt(index int, n *node) (old *node) {
-	/******
 	old = (*s)[index]
 	(*s)[index] = n
-	****/
+	/******
 	e := unsafe.Pointer(&(*s)[index])
 	o := atomic.SwapPointer((*unsafe.Pointer)(e), unsafe.Pointer(n))
 	old = (*node)(o)
-	return
-}
-
-// setAt store the node in position i and return the previous node
-func (s *children) getAt(index int) (n *node) {
-	e := unsafe.Pointer(&(*s)[index])
-	o := atomic.LoadPointer((*unsafe.Pointer)(e))
-	n = (*node)(o)
-	return
-	/****
-	return (*s)[index]
 	****/
+	return
 }
 
 // removeAt removes a value at a given index, pulling all subsequent values
@@ -295,11 +283,6 @@ func (n *node) clear() {
 }
 
 func (n *node) mutableFor(cow *copyOnWriteContext) *node {
-	/*******
-	if n.cow == cow {
-		return n
-	}
-	********/
 	out := cow.newNode()
 	if cap(out.items) >= len(n.items) {
 		out.items = out.items[:len(n.items)]
@@ -605,7 +588,7 @@ func (n *node) iterate(dir direction, start, stop Item, includeStart bool, hit b
 				continue
 			}
 			if len(n.children) > i {
-				child := n.children.getAt(i)
+				child := n.children[i]
 				if hit, ok = child.iterate(dir, start, stop, includeStart, hit, iter, ctx); !ok {
 					return hit, false
 				}
@@ -623,7 +606,7 @@ func (n *node) iterate(dir direction, start, stop Item, includeStart bool, hit b
 			}
 		}
 		if l := len(n.children); l > 0 {
-			child := n.children.getAt(l - 1)
+			child := n.children[l-1]
 			if hit, ok = child.iterate(dir, start, stop, includeStart, hit, iter, ctx); !ok {
 				return hit, false
 			}
@@ -637,7 +620,7 @@ func (n *node) iterate(dir direction, start, stop Item, includeStart bool, hit b
 				}
 			}
 			if len(n.children) > 0 {
-				child := n.children.getAt(i + 1)
+				child := n.children[i+1]
 				if hit, ok = child.iterate(dir, start, stop, includeStart, hit, iter, ctx); !ok {
 					return hit, false
 				}
@@ -651,7 +634,7 @@ func (n *node) iterate(dir direction, start, stop Item, includeStart bool, hit b
 			}
 		}
 		if len(n.children) > 0 {
-			child := n.children.getAt(0)
+			child := n.children[0]
 			if hit, ok = child.iterate(dir, start, stop, includeStart, hit, iter, ctx); !ok {
 				return hit, false
 			}
