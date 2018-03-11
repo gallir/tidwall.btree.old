@@ -760,13 +760,14 @@ func (t *BTree) ReplaceOrInsert(item Item) Item {
 	}
 
 	if len(root.items) >= t.maxItems() {
-		r := root.mutableFor(t.cow)
-		item2, second := r.split(t.maxItems() / 2)
-		oldroot := r
-		r = t.cow.newNode()
+		oldroot := root.mutableFor(t.cow)
+		item2, second := oldroot.split(t.maxItems() / 2)
+		r := t.cow.newNode()
 		r.items = append(r.items, item2)
 		r.children = append(r.children, oldroot, second)
-		t.cow.freeNode(root)
+		if oldroot != root {
+			t.cow.freeNode(root)
+		}
 		root = r
 	}
 
