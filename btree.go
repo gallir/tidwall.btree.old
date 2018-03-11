@@ -70,6 +70,7 @@ type Item interface {
 
 const (
 	DefaultFreeListSize = 32
+	MinSequenceDiff     = 2
 )
 
 var (
@@ -99,7 +100,7 @@ func NewFreeList(size int) *FreeList {
 
 func (f *FreeList) newNode(cow *copyOnWriteContext) (n *node) {
 	f.mu.Lock()
-	if f.n <= 0 || cow.sequence <= f.freelist[f.out].sequence || cow.sequence-f.freelist[f.out].sequence < 10 {
+	if f.n <= 0 || *cow.sequence == f.freelist[f.out].sequence || *cow.sequence-f.freelist[f.out].sequence < MinSequenceDiff {
 		f.mu.Unlock()
 		return new(node)
 	}
@@ -140,9 +141,10 @@ func NewWithFreeList(degree int, f *FreeList, ctx interface{}) *BTree {
 	if degree <= 1 {
 		panic("bad degree")
 	}
+	sequence := uint32(0)
 	return &BTree{
 		degree: degree,
-		cow:    &copyOnWriteContext{freelist: f},
+		cow:    &copyOnWriteContext{freelist: f, sequence: &sequence},
 		ctx:    ctx,
 	}
 }
@@ -281,7 +283,7 @@ func (n *node) clear() {
 }
 
 func (n *node) mutableFor(cow *copyOnWriteContext) *node {
-	if n.cow == cow && n.sequence == cow.sequence {
+	if n.cow == cow && n.sequence == *cow.sequence {
 		return n
 	}
 
@@ -675,7 +677,7 @@ type BTree struct {
 // copy.
 type copyOnWriteContext struct {
 	freelist *FreeList
-	sequence uint32
+	sequence *uint32
 }
 
 // Clone clones the btree, lazily.  Clone should not be called concurrently,
@@ -695,6 +697,7 @@ func (t *BTree) Clone() (t2 *BTree) {
 	//   the original, shared nodes (old b.cow)
 	//   the new b.cow nodes
 	//   the new out.cow nodes
+	atomic.AddUint32(t.cow.sequence, 1)
 	cow1, cow2 := *t.cow, *t.cow
 	out := *t
 	t.cow = &cow1
@@ -720,7 +723,7 @@ func (c *copyOnWriteContext) newNode() (n *node) {
 }
 
 func (c *copyOnWriteContext) freeNode(n *node) {
-	n.sequence = c.sequence
+	n.sequence = *c.sequence
 	c.freelist.freeNode(n)
 }
 
@@ -748,8 +751,6 @@ func (t *BTree) ReplaceOrInsert(item Item) Item {
 	}
 
 	root := t.getRoot()
-	atomic.AddUint32(&t.cow.sequence, 1)
-
 	if root == nil {
 		r := t.cow.newNode()
 		r.items = append(r.items, item)
@@ -805,7 +806,6 @@ func (t *BTree) deleteItem(item Item, typ toRemove, ctx interface{}) Item {
 	if troot == nil || len(troot.items) == 0 {
 		return nil
 	}
-	atomic.AddUint32(&t.cow.sequence, 1)
 
 	out, root := troot.remove(item, t.minItems(), typ, ctx)
 	if len(root.items) == 0 && len(root.children) > 0 {
