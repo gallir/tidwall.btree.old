@@ -719,6 +719,7 @@ func (t *BTree) minItems() int {
 func (c *copyOnWriteContext) newNode() (n *node) {
 	n = c.freelist.newNode(c)
 	n.cow = c
+	n.sequence = *c.sequence
 	return
 }
 
